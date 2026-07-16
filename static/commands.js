@@ -1265,7 +1265,7 @@ async function cmdGoal(args){
       model:_goalModel,
       model_provider:_goalProvider,
       explicit_model_pick:_explicitPick,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:S.session.profile||S.activeProfile||'default',
     })});
     const msg = (() => {
       const raw = String((r && r.message) || '').trim();
