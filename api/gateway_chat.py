@@ -1385,6 +1385,8 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
+            from api.models import refresh_session_git_provenance
+            refresh_session_git_provenance(s)
             s.save()
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()

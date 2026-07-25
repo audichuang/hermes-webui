@@ -12176,6 +12176,8 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
+                    from api.models import refresh_session_git_provenance
+                    refresh_session_git_provenance(s)
                     s.save()
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)

@@ -1255,6 +1255,10 @@ class Session:
                 worktree_branch=None,
                  worktree_repo_root=None,
                  worktree_created_at=None,
+                 git_repo_root=None,
+                 git_branch=None,
+                 git_head_at_start=None,
+                 git_head_sha=None,
                  enabled_toolsets=None,
                  composer_draft=None,
                  anchor_activity_scenes=None,
@@ -1353,6 +1357,10 @@ class Session:
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
         self.worktree_created_at = worktree_created_at
+        self.git_repo_root = str(Path(git_repo_root).expanduser().resolve()) if git_repo_root else None
+        self.git_branch = str(git_branch) if git_branch else None
+        self.git_head_at_start = str(git_head_at_start) if git_head_at_start else None
+        self.git_head_sha = str(git_head_sha) if git_head_sha else None
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.raw_source = kwargs.get('raw_source')
@@ -1433,6 +1441,7 @@ class Session:
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
+            'git_repo_root', 'git_branch', 'git_head_at_start', 'git_head_sha',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
@@ -1814,6 +1823,12 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
+            **({
+                'git_repo_root': self.git_repo_root,
+                'git_branch': self.git_branch,
+                'git_head_at_start': self.git_head_at_start,
+                'git_head_sha': self.git_head_sha,
+            } if self.git_repo_root else {}),
             'user_message_count': Session._compute_user_message_count(self.messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
@@ -5097,6 +5112,12 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
 
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
+    try:
+        from api.workspace import git_provenance_for_workspace
+
+        git_provenance = git_provenance_for_workspace(workspace_path or get_last_workspace())
+    except Exception:
+        git_provenance = {}
     s = Session(
         workspace=workspace_path or get_last_workspace(),
         model=effective_model,
@@ -5108,6 +5129,10 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        git_repo_root=git_provenance.get('git_repo_root'),
+        git_branch=git_provenance.get('git_branch'),
+        git_head_at_start=git_provenance.get('git_head_sha'),
+        git_head_sha=git_provenance.get('git_head_sha'),
         enabled_toolsets=enabled_toolsets,
     )
     # #4985: defensive — auto-generated uuids don't collide with the
@@ -5131,6 +5156,65 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     if wt:
         s.save()
     return s
+
+
+def refresh_session_git_provenance(session) -> None:
+    """Refresh the ending Git identity without changing the starting commit."""
+    try:
+        from api.workspace import git_provenance_for_workspace
+
+        provenance = git_provenance_for_workspace(getattr(session, 'workspace', None))
+    except Exception:
+        return
+    if not provenance:
+        return
+    session.git_repo_root = provenance.get('git_repo_root')
+    session.git_branch = provenance.get('git_branch')
+    session.git_head_sha = provenance.get('git_head_sha')
+    if not getattr(session, 'git_head_at_start', None):
+        session.git_head_at_start = session.git_head_sha
+
+
+def enrich_session_project_membership(rows: list[dict]) -> list[dict]:
+    """Project unassigned session rows from workspace paths in one DB read/profile.
+
+    First-class Hermes membership is path-derived.  Persisted WebUI assignments
+    still win so historical chats keep their original association if Project
+    folders are edited later.
+    """
+    from api.projects_db_adapter import load_projects_from_db
+
+    projects_by_profile: dict[str, list[tuple[Path, dict]]] = {}
+    for row in rows:
+        if row.get('project_id'):
+            continue
+        workspace = row.get('workspace') or row.get('cwd')
+        if not workspace:
+            continue
+        profile = str(row.get('profile') or 'default')
+        if profile not in projects_by_profile:
+            candidates: list[tuple[Path, dict]] = []
+            for project in load_projects_from_db(profile_name=profile) or []:
+                for folder in project.get('folders') or []:
+                    path = folder.get('path') if isinstance(folder, dict) else None
+                    if path:
+                        candidates.append((Path(path).expanduser().resolve(), project))
+            candidates.sort(key=lambda item: len(str(item[0])), reverse=True)
+            projects_by_profile[profile] = candidates
+        try:
+            target = Path(workspace).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        for folder, project in projects_by_profile[profile]:
+            try:
+                target.relative_to(folder)
+            except ValueError:
+                continue
+            row['project_id'] = project.get('project_id')
+            if project.get('hermes_project_id'):
+                row['hermes_project_id'] = project['hermes_project_id']
+            break
+    return rows
 
 def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False, show_webhook: bool = False, show_kanban: bool = False) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
@@ -6662,7 +6746,12 @@ def load_projects(
 
 
 def project_identity_matches(project: dict, project_id: str | None, profile_name: str | None) -> bool:
-    if project.get('project_id') != project_id:
+    identifiers = {
+        project.get('project_id'),
+        project.get('hermes_project_id'),
+        project.get('slug'),
+    }
+    if project_id not in identifiers:
         return False
     from api.profiles import _profiles_match
 

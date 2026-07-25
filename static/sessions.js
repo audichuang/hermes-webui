@@ -1413,8 +1413,19 @@ async function newSession(flash, options={}){
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const selectedProject=(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&
+      typeof _allProjects!=='undefined'&&Array.isArray(_allProjects))
+      ? _allProjects.find(p=>typeof _projectFilterMatches==='function'
+        ? _projectFilterMatches(_activeProject,p)
+        : String(p.project_id||'')===String(_activeProject.project_id||''))
+      : null;
+    const projectWs=selectedProject&&(selectedProject.primary_path||selectedProject.default_workspace);
+    // fork delta: an explicitly selected project's path outranks inheriting the
+    // current conversation's workspace. sessionWs must exclude that case too, or
+    // workspace_inherited_from_prev_session would lie about where the path came
+    // from and the server would widen trust for a path it never inherited.
+    const sessionWs=(!switchWs&&!projectWs&&S.session)?S.session.workspace:null;
+    const inheritWs=switchWs||projectWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
@@ -7034,8 +7045,16 @@ function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   const fallback=String(cleanTitle||'Untitled').trim()||'Untitled';
   const full=String(rawTitle||fallback).trim()||fallback;
   const title=full.startsWith('[SYSTEM:') ? fallback : full;
-  if(typeof t==='function'&&_isReadOnlySession(session)) return t('session_readonly_title_hint', title);
-  return title;
+  const lines=[typeof t==='function'&&_isReadOnlySession(session)?t('session_readonly_title_hint', title):title];
+  const project=session&&session.project_id
+    ? _allProjects.find(p=>_projectFilterMatches(_projectFilterIdentity(session),p))
+    : null;
+  if(project) lines.push(`Project: ${project.name}`);
+  if(session&&session.git_head_sha){
+    const branch=session.git_branch?`${session.git_branch} @ `:'';
+    lines.push(`Git: ${branch}${String(session.git_head_sha).slice(0,12)}`);
+  }
+  return lines.join('\n');
 }
 
 function _sessionForkTooltip(parentLabel){
@@ -8383,6 +8402,14 @@ function renderSessionListFromCache(){
       if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      const projectMeta=s.project_id
+        ? _allProjects.find(p=>_projectFilterMatches(_projectFilterIdentity(s),p))
+        : null;
+      if(projectMeta) metaBits.push(projectMeta.name);
+      if(s.git_head_sha){
+        const shortSha=String(s.git_head_sha).slice(0,8);
+        metaBits.push(s.git_branch?`${s.git_branch}@${shortSha}`:shortSha);
+      }
       const meta=document.createElement('div');
       meta.className='session-meta';
       meta.textContent=metaBits.join(' · ');
@@ -9382,7 +9409,9 @@ function _showProjectPicker(session, anchorEl){
     if(!name||!name.trim()) return;
     const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
     const profile = session.profile || undefined;
-    const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
+    const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({
+      name:name.trim(),color,profile,primary_path:session.workspace||null
+    })});
     if(res.project){
       _allProjects.push(res.project);
       // Guard the move so a 503 (session busy/streaming, #3746) shows a toast
@@ -9455,7 +9484,9 @@ function _startProjectCreate(bar, addBtn){
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
       try{
-        await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+        await api('/api/projects/create',{method:'POST',body:JSON.stringify({
+          name:inp.value.trim(),color,primary_path:(S.session&&S.session.workspace)||null
+        })});
       }catch(e){
         _finishDone=false;
         showToast('Project create failed: '+(e.message||e));
@@ -9560,6 +9591,76 @@ function _showProjectContextMenu(e, proj, chip){
     colorRow.appendChild(dot);
   });
   menu.appendChild(colorRow);
+
+  if(proj.source==='hermes'){
+    const addFolder=document.createElement('div');
+    addFolder.textContent='Add folder…';
+    addFolder.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    addFolder.onmouseenter=()=>addFolder.style.background='var(--hover-bg)';
+    addFolder.onmouseleave=()=>addFolder.style.background='';
+    addFolder.onclick=async()=>{
+      menu.remove();
+      const path=await showPromptDialog({
+        title:'Add project folder',
+        message:'Folder path',
+        placeholder:'/path/to/repository',
+        confirmLabel:'Add'
+      });
+      if(!path||!path.trim()) return;
+      try{
+        await api('/api/projects/folders/add',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{path:path.trim()}))});
+        await renderSessionList();
+        showToast('Folder added');
+      }catch(err){showToast('Add folder failed: '+(err.message||err));}
+    };
+    menu.appendChild(addFolder);
+
+    if(Array.isArray(proj.folders)&&proj.folders.length>1){
+      const setPrimary=document.createElement('div');
+      setPrimary.textContent='Set primary folder…';
+      setPrimary.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+      setPrimary.onmouseenter=()=>setPrimary.style.background='var(--hover-bg)';
+      setPrimary.onmouseleave=()=>setPrimary.style.background='';
+      setPrimary.onclick=async()=>{
+        menu.remove();
+        const path=await showPromptDialog({
+          title:'Set primary folder',
+          message:'Choose one of this Project’s folder paths',
+          value:proj.primary_path||'',
+          confirmLabel:'Set primary'
+        });
+        if(!path||!path.trim()) return;
+        try{
+          await api('/api/projects/folders/primary',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{path:path.trim()}))});
+          await renderSessionList();
+          showToast('Primary folder updated');
+        }catch(err){showToast('Primary folder failed: '+(err.message||err));}
+      };
+      menu.appendChild(setPrimary);
+    }
+
+    const bindBoard=document.createElement('div');
+    bindBoard.textContent='Bind Kanban board…';
+    bindBoard.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    bindBoard.onmouseenter=()=>bindBoard.style.background='var(--hover-bg)';
+    bindBoard.onmouseleave=()=>bindBoard.style.background='';
+    bindBoard.onclick=async()=>{
+      menu.remove();
+      const board=await showPromptDialog({
+        title:'Bind Kanban board',
+        message:'Board slug (leave empty to clear)',
+        value:proj.board_slug||'',
+        confirmLabel:'Save'
+      });
+      if(board===null) return;
+      try{
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify(_projectRequestPayload(proj,{name:proj.name,board_slug:board.trim()}))});
+        await renderSessionList();
+        showToast('Kanban binding updated');
+      }catch(err){showToast('Kanban binding failed: '+(err.message||err));}
+    };
+    menu.appendChild(bindBoard);
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');

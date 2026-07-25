@@ -1800,6 +1800,25 @@ def _run_git(args, cwd, timeout=3):
         return None
 
 
+def git_provenance_for_workspace(workspace: str | Path) -> dict:
+    """Return stable Git provenance for a session workspace.
+
+    This is intentionally smaller than ``git_info_for_workspace``: session
+    persistence needs identity (repo, branch, commit), not working-tree counts.
+    """
+    path = Path(workspace).expanduser()
+    if not path.exists():
+        return {}
+    repo_root = _run_git(["rev-parse", "--show-toplevel"], path, timeout=2)
+    if not repo_root:
+        return {}
+    return {
+        "git_repo_root": repo_root,
+        "git_branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"], path, timeout=2),
+        "git_head_sha": _run_git(["rev-parse", "HEAD"], path, timeout=2),
+    }
+
+
 def git_info_for_workspace(workspace: Path) -> dict:
     """Return git info for a workspace directory, or None if not a git repo."""
     if not (workspace / '.git').exists():

@@ -110,7 +110,14 @@ State directory (runtime data, separate from source):
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
-    projects.json      Session project groups (name, color, id)
+    projects.json      Legacy session project groups (fallback when Agent Project APIs are unavailable)
+
+The authoritative first-class Project store is the active Hermes profile's
+`projects.db` (normally `~/.hermes/projects.db`). `api/projects_db_adapter.py`
+maps its canonical `p_*` IDs, slugs, folders, primary path, and metadata into
+the WebUI compatibility shape. Existing WebUI sessions continue to persist the
+Project slug as `project_id`; unassigned history is projected from its
+workspace/cwd using longest-folder-prefix matching.
 
 Log file:
 
@@ -211,7 +218,11 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
       updated_at    float Unix timestamp, updated on every save()
       pinned        bool, default False (Sprint 12)
       archived      bool, default False (Sprint 14)
-      project_id    string or null, FK to projects.json (Sprint 15)
+      project_id    string or null, first-class Project slug or legacy projects.json ID
+      git_repo_root absolute Git repository root captured for the chat
+      git_branch    branch at the latest successful turn
+      git_head_at_start full commit SHA captured when the chat was created
+      git_head_sha  full commit SHA at the latest successful turn
       tool_calls    list of tool call dicts (Sprint 10)
 
     Key methods:

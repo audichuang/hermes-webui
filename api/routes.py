@@ -2485,6 +2485,9 @@ def _build_session_list_cache_payload(
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
+    from api.models import enrich_session_project_membership
+
+    enrich_session_project_membership(merged)
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
@@ -15235,19 +15238,54 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "invalid profile", status=400)
         session_profile = requested_profile or get_active_profile_name() or "default"
         project_id = body.get("project_id") or None
+        target_project = None
         if project_id:
             projects = load_projects(include_db=True, profile_name=session_profile)
-            if not any(project_identity_matches(p, project_id, session_profile) for p in projects):
+            target_project = next(
+                (p for p in projects if project_identity_matches(p, project_id, session_profile)),
+                None,
+            )
+            if target_project is None:
                 return bad(handler, "Project not found", status=404)
+            project_id = target_project.get("project_id") or project_id
         workspace_prev_session_id = body.get("prev_session_id")
         if workspace_prev_session_id and not _session_id_visible_to_request_profile(
             handler, workspace_prev_session_id, emit_error=False
         ):
             workspace_prev_session_id = None
+        requested_workspace = body.get("workspace")
+        if target_project and target_project.get("source") == "hermes":
+            from api.projects_db_adapter import project_for_path_from_db
+
+            owner = project_for_path_from_db(
+                requested_workspace,
+                profile_name=session_profile,
+            ) if requested_workspace else None
+            if not owner or not project_identity_matches(
+                owner,
+                target_project.get("project_id"),
+                session_profile,
+            ):
+                requested_workspace = target_project.get("primary_path") or requested_workspace
         try:
-            workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
+            if requested_workspace != body.get("workspace"):
+                # fork delta: a hermes-owned project path replaced the requested
+                # workspace, so it was never inherited from prev_session — resolve
+                # it strictly instead of through the inheritance-recovery helper.
+                workspace = str(resolve_trusted_workspace(requested_workspace)) if requested_workspace else None
+            else:
+                workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        if not project_id and workspace:
+            from api.projects_db_adapter import project_for_path_from_db
+
+            inferred_project = project_for_path_from_db(
+                workspace,
+                profile_name=session_profile,
+            )
+            if inferred_project:
+                project_id = inferred_project.get("project_id")
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always
@@ -17168,7 +17206,7 @@ def handle_post(handler, parsed) -> bool:
                 status=503,
             )
         try:
-            s.project_id = target_pid
+            s.project_id = target.get("project_id") if target_pid else None
             s.save()
         finally:
             _move_lock.release()
@@ -17193,7 +17231,6 @@ def handle_post(handler, parsed) -> bool:
         color = body.get("color")
         if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
             return bad(handler, "Invalid color format")
-        projects = load_projects()
         # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
         # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
         # client could create a project tagged with an arbitrary/unknown profile,
@@ -17203,11 +17240,32 @@ def handle_post(handler, parsed) -> bool:
             from api.profiles import _PROFILE_ID_RE
             if not _PROFILE_ID_RE.fullmatch(_requested_profile):
                 return bad(handler, "invalid profile")
+        profile_name = _requested_profile or get_active_profile_name() or 'default'
+        from api.projects_db_adapter import create_project_in_db
+
+        folders = body.get("folders") if isinstance(body.get("folders"), list) else []
+        primary_path = str(body.get("primary_path") or "").strip() or None
+        db_project = create_project_in_db(
+            profile_name=profile_name,
+            name=name,
+            slug=str(body.get("slug") or "").strip() or None,
+            description=body.get("description"),
+            icon=body.get("icon"),
+            color=color,
+            board_slug=body.get("board_slug"),
+            folders=[str(path) for path in folders if str(path).strip()],
+            primary_path=primary_path,
+        )
+        if isinstance(db_project, dict):
+            return j(handler, {"ok": True, "project": db_project})
+        if db_project is False:
+            return bad(handler, "Failed to create Hermes project", 400)
+        projects = load_projects()
         proj = {
             "project_id": uuid.uuid4().hex[:12],
             "name": name,
             "color": color,
-            "profile": _requested_profile or get_active_profile_name() or 'default',
+            "profile": profile_name,
             "created_at": time.time(),
         }
         projects.append(proj)
@@ -17230,7 +17288,7 @@ def handle_post(handler, parsed) -> bool:
             if not _profiles_match(requested_profile, active_profile):
                 return bad(handler, "Project not found", 404)
         requested_profile = requested_profile or active_profile
-        projects = load_projects()
+        projects = load_projects(include_db=True, profile_name=requested_profile)
         proj = next(
             (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
@@ -17238,14 +17296,88 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Project not found", 404)
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        proj["name"] = body["name"].strip()[:128]
         if "color" in body:
             color = body["color"]
             if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
                 return bad(handler, "Invalid color format")
-            proj["color"] = color
-        save_projects(projects)
-        return j(handler, {"ok": True, "project": proj})
+        if proj.get("source") == "hermes":
+            from api.projects_db_adapter import update_project_in_db
+
+            changes = {"name": body["name"].strip()[:128]}
+            for key in ("description", "icon", "color", "board_slug"):
+                if key in body:
+                    changes[key] = body[key]
+            updated = update_project_in_db(
+                str(proj.get("hermes_project_id") or proj["project_id"]),
+                profile_name=requested_profile,
+                changes=changes,
+            )
+            if not isinstance(updated, dict):
+                return bad(handler, "Failed to update Hermes project", 400)
+            return j(handler, {"ok": True, "project": updated})
+        legacy_projects = load_projects()
+        legacy_project = next(
+            (
+                p for p in legacy_projects
+                if project_identity_matches(p, body["project_id"], requested_profile)
+            ),
+            None,
+        )
+        if legacy_project is None:
+            return bad(handler, "Project not found", 404)
+        legacy_project["name"] = body["name"].strip()[:128]
+        if "color" in body:
+            legacy_project["color"] = body["color"]
+        save_projects(legacy_projects)
+        return j(handler, {"ok": True, "project": legacy_project})
+
+    if parsed.path in {
+        "/api/projects/archive",
+        "/api/projects/restore",
+        "/api/projects/folders/add",
+        "/api/projects/folders/remove",
+        "/api/projects/folders/primary",
+    }:
+        try:
+            require(body, "project_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        requested_profile = str(body.get("profile") or get_active_profile_name() or "default").strip()
+        active_profile = get_active_profile_name() or "default"
+        from api.profiles import _PROFILE_ID_RE
+
+        if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+            return bad(handler, "invalid profile")
+        if not _profiles_match(requested_profile, active_profile):
+            return bad(handler, "Project not found", 404)
+        store_id = str(body["project_id"])
+        if parsed.path in {"/api/projects/archive", "/api/projects/restore"}:
+            from api.projects_db_adapter import archive_project_in_db
+
+            updated = archive_project_in_db(
+                store_id,
+                profile_name=requested_profile,
+                archived=parsed.path.endswith("/archive"),
+            )
+        else:
+            try:
+                require(body, "path")
+            except ValueError as e:
+                return bad(handler, str(e))
+            from api.projects_db_adapter import change_project_folder_in_db
+
+            action = parsed.path.rsplit("/", 1)[-1]
+            updated = change_project_folder_in_db(
+                store_id,
+                profile_name=requested_profile,
+                action=action,
+                path=str(body["path"]),
+                label=body.get("label"),
+                is_primary=bool(body.get("is_primary")),
+            )
+        if not isinstance(updated, dict):
+            return bad(handler, "Hermes project not found", 404)
+        return j(handler, {"ok": True, "project": updated})
 
     if parsed.path == "/api/projects/delete":
         try:
@@ -17261,7 +17393,7 @@ def handle_post(handler, parsed) -> bool:
             if not _profiles_match(requested_profile, active_profile):
                 return bad(handler, "Project not found", 404)
         requested_profile = requested_profile or active_profile
-        projects = load_projects()
+        projects = load_projects(include_db=True, profile_name=requested_profile)
         proj = next(
             (p for p in projects if project_identity_matches(p, body["project_id"], requested_profile)), None
         )
@@ -17269,11 +17401,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Project not found", 404)
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        projects = [
-            p for p in projects
-            if not project_identity_matches(p, body["project_id"], requested_profile)
-        ]
-        save_projects(projects)
+        if proj.get("source") == "hermes":
+            from api.projects_db_adapter import delete_project_in_db
+
+            deleted = delete_project_in_db(
+                str(proj.get("hermes_project_id") or proj["project_id"]),
+                profile_name=requested_profile,
+            )
+            if deleted is not True:
+                return bad(handler, "Failed to delete Hermes project", 400)
+        else:
+            legacy_projects = load_projects()
+            legacy_projects = [
+                p for p in legacy_projects
+                if not project_identity_matches(p, body["project_id"], requested_profile)
+            ]
+            save_projects(legacy_projects)
         # Unassign all sessions that belonged to this project.
         # #3746: this loop is O(N) full-JSON read+save per session, and each
         # save() reserializes the entire messages array. For a project with many
@@ -17292,8 +17435,9 @@ def handle_post(handler, parsed) -> bool:
                 index = json.loads(SESSION_INDEX_FILE.read_bytes())
                 active_ids = _active_stream_ids()
                 deferred_to_stream = []
+                deleted_session_project_id = proj.get("project_id") or body["project_id"]
                 for entry in index:
-                    if entry.get("project_id") != body["project_id"]:
+                    if entry.get("project_id") != deleted_session_project_id:
                         continue
                     if not _profiles_match(entry.get("profile"), requested_profile):
                         continue

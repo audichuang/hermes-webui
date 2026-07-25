@@ -220,7 +220,13 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
-- Session projects -- named groups with colors for organizing sessions
+- Hermes Projects -- the WebUI reads and writes the same per-profile
+  `projects.db` used by Hermes CLI/Desktop, including folders, primary path,
+  color/icon/description, and Kanban board binding. Selecting a Project starts
+  new chats in its primary folder; unassigned CLI/history rows are associated
+  by their workspace path.
+- Session Git provenance -- Project chats retain the repository root, branch,
+  starting commit, and latest commit in session metadata and sidebar details
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
@@ -644,8 +650,10 @@ docker-compose.yml  Compose with named volume and optional auth
                     multi-arch Docker build + GitHub Release on tag
 ```
 
-State lives outside the repo at `~/.hermes/webui/` by default
-(sessions, workspaces, settings, projects, last_workspace). Override with `HERMES_WEBUI_STATE_DIR`.
+WebUI state lives outside the repo at `~/.hermes/webui/` by default
+(sessions, workspaces, settings, legacy project groups, last_workspace). First-class
+Hermes Projects live in the active profile's `projects.db` (normally
+`~/.hermes/projects.db`). Override WebUI state with `HERMES_WEBUI_STATE_DIR`.
 Full design notes and the endpoint catalog are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---

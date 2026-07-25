@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
-import shutil
 import sqlite3
 import sys
+import time
 import types
 from pathlib import Path
 from urllib.parse import urlparse
@@ -82,24 +82,27 @@ def test_projects_db_adapter_maps_slug_and_profile(monkeypatch, tmp_path):
 
     rows = adapter.load_projects_from_db()
 
-    assert rows == [
-        {
-            "project_id": "team-project",
-            "name": "Team Project",
-            "color": "#123456",
-            "profile": "work",
-            "created_at": 123,
-            "primary_path": "/workspace/team",
-            "folders": [
-                {
-                    "path": "/workspace/team",
-                    "label": None,
-                    "is_primary": True,
-                    "added_at": 7,
-                }
-            ],
-        }
-    ]
+    assert len(rows) == 1
+    assert rows[0] | {} == {
+        "project_id": "team-project",
+        "slug": "team-project",
+        "name": "Team Project",
+        "description": None,
+        "icon": None,
+        "color": "#123456",
+        "board_slug": None,
+        "profile": "work",
+        "source": "hermes",
+        "created_at": 123,
+        "primary_path": "/workspace/team",
+        "default_workspace": "/workspace/team",
+        "folders": [{
+            "path": "/workspace/team",
+            "label": None,
+            "is_primary": True,
+            "added_at": 7,
+        }],
+    }
 
 
 def test_projects_db_adapter_reads_selected_profile_home(monkeypatch, tmp_path):
@@ -125,14 +128,10 @@ def test_projects_db_adapter_reads_selected_profile_home(monkeypatch, tmp_path):
 
     rows = adapter.load_projects_from_db(profile_name="work")
 
-    assert rows == [
-        {
-            "project_id": "profile-project",
-            "name": "Profile Project",
-            "color": None,
-            "profile": "work",
-        }
-    ]
+    assert len(rows) == 1
+    assert rows[0]["project_id"] == "profile-project"
+    assert rows[0]["profile"] == "work"
+    assert rows[0]["source"] == "hermes"
 
 
 def test_projects_db_adapter_uses_read_only_sqlite_uri(monkeypatch, tmp_path):
@@ -159,7 +158,8 @@ def test_projects_db_adapter_uses_read_only_sqlite_uri(monkeypatch, tmp_path):
     assert adapter.load_projects_from_db(profile_name="work")
     assert seen["uri"] is True
     assert seen["database"].startswith("file:///")
-    assert seen["database"].endswith("?mode=ro&immutable=1")
+    assert seen["database"].endswith("?mode=ro")
+    assert "immutable" not in seen["database"]
 
 
 def test_projects_db_adapter_uses_wal_aware_read_only_uri(monkeypatch, tmp_path):
@@ -235,31 +235,20 @@ def test_projects_db_adapter_reads_live_wal_rows(monkeypatch, tmp_path):
     finally:
         writer.close()
 
-    assert rows == [
-        {
-            "project_id": "wal-project",
-            "name": "WAL Project",
-            "color": "#123456",
-            "profile": "work",
-        }
-    ]
+    assert [row["project_id"] for row in rows] == ["wal-project"]
+    assert rows[0]["source"] == "hermes"
 
 
-def test_projects_db_adapter_reads_wal_only_from_temporary_snapshot(monkeypatch, tmp_path):
+def test_projects_db_adapter_respects_rollback_journal_locks(monkeypatch, tmp_path):
     import api.projects_db_adapter as adapter
 
     db_file = _profile_home(tmp_path, "work") / "projects.db"
     db_file.parent.mkdir(parents=True)
-    source_db = tmp_path / "source.db"
-    writer = sqlite3.connect(source_db)
+    writer = sqlite3.connect(db_file, isolation_level=None)
     try:
-        writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("PRAGMA journal_mode=DELETE")
         writer.execute("CREATE TABLE projects (slug TEXT, name TEXT, color TEXT)")
-        writer.execute("INSERT INTO projects VALUES ('partial', 'Partial', '#abcdef')")
-        writer.commit()
-        db_file.write_bytes(source_db.read_bytes())
-        db_file.with_name("projects.db-wal").write_bytes(source_db.with_name("source.db-wal").read_bytes())
+        writer.execute("INSERT INTO projects VALUES ('stable', 'Committed', '#abcdef')")
 
         module = types.ModuleType("hermes_cli.projects_db")
         module.list_projects = lambda conn: [
@@ -273,89 +262,31 @@ def test_projects_db_adapter_reads_wal_only_from_temporary_snapshot(monkeypatch,
         monkeypatch.setitem(sys.modules, "hermes_cli.projects_db", module)
         monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
 
-        assert adapter.load_projects_from_db(profile_name="work") == [
-            {"project_id": "partial", "name": "Partial", "color": "#abcdef", "profile": "work"}
-        ]
-        assert not db_file.with_name("projects.db-shm").exists()
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("UPDATE projects SET name = 'Uncommitted'")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(adapter.load_projects_from_db, profile_name="work")
+            time.sleep(0.1)
+            writer.execute("ROLLBACK")
+            rows = future.result(timeout=3)
     finally:
         writer.close()
 
+    assert rows[0]["name"] == "Committed"
 
-def test_projects_db_adapter_retries_checkpoint_between_snapshot_copies(monkeypatch, tmp_path):
+def test_projects_db_adapter_invalid_profile_never_reads_root(monkeypatch, tmp_path):
     import api.projects_db_adapter as adapter
 
-    db_file = _profile_home(tmp_path, "work") / "projects.db"
+    db_file = _profile_home(tmp_path, "default") / "projects.db"
     db_file.parent.mkdir(parents=True)
-    wal_path = db_file.with_name("projects.db-wal")
-    db_file.write_text("old-main", encoding="utf-8")
-    wal_path.write_text("new-wal", encoding="utf-8")
-
-    class _FakeConn:
-        def __init__(self, database: str):
-            parsed = urlparse(database)
-            path = parsed.path
-            if path.startswith("/") and path[2:3] == ":":
-                path = path.removeprefix("/")
-            self.path = Path(path)
-            self.row_factory = None
-
-        def close(self):
-            return None
-
-    module = types.ModuleType("hermes_cli.projects_db")
-    module.list_projects = lambda conn: [
-        types.SimpleNamespace(slug="old", name="Old", color="#111111", archived=False),
-        *(
-            [types.SimpleNamespace(slug="new", name="New", color="#222222", archived=False)]
-            if "new-main" in conn.path.read_text(encoding="utf-8")
-            or conn.path.with_name(f"{conn.path.name}-wal").read_text(encoding="utf-8")
-            else []
-        ),
-    ]
-    package = types.ModuleType("hermes_cli")
-    package.__path__ = []
-    package.projects_db = module
-    monkeypatch.setitem(sys.modules, "hermes_cli", package)
-    monkeypatch.setitem(sys.modules, "hermes_cli.projects_db", module)
-    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
-    monkeypatch.setattr(adapter.sqlite3, "connect", lambda database, *args, **kwargs: _FakeConn(database))
-
-    real_copy2 = shutil.copy2
-    copied = []
-    raced = {"done": False}
-
-    def _copy2(src, dst, *args, **kwargs):
-        copied.append(Path(src).name)
-        result = real_copy2(src, dst, *args, **kwargs)
-        if Path(src) == db_file and not raced["done"]:
-            raced["done"] = True
-            db_file.write_text("new-main", encoding="utf-8")
-            wal_path.write_text("", encoding="utf-8")
-        return result
-
-    monkeypatch.setattr(adapter.shutil, "copy2", _copy2)
-
-    assert adapter.load_projects_from_db(profile_name="work") == [
-        {"project_id": "old", "name": "Old", "color": "#111111", "profile": "work"},
-        {"project_id": "new", "name": "New", "color": "#222222", "profile": "work"},
-    ]
-    assert copied.count("projects.db") >= 2
-    assert copied.count("projects.db-wal") >= 2
-
-
-def test_projects_db_adapter_fails_closed_for_shm_only_without_mutation(monkeypatch, tmp_path):
-    import api.projects_db_adapter as adapter
-
-    _install_fake_projects_db(monkeypatch, projects=[])
-    db_file = _profile_home(tmp_path, "work") / "projects.db"
-    db_file.parent.mkdir(parents=True)
-    db_file.write_bytes(b"not a database")
-    shm_path = db_file.with_name("projects.db-shm")
-    shm_path.write_bytes(b"stale")
+    db_file.write_text("", encoding="utf-8")
+    _install_fake_projects_db(
+        monkeypatch,
+        projects=[types.SimpleNamespace(slug="secret", name="Root", color=None, archived=False)],
+    )
     monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
 
-    assert adapter.load_projects_from_db(profile_name="work") is None
-    assert shm_path.read_bytes() == b"stale"
+    assert adapter.load_projects_from_db(profile_name="../../root") is None
 
 
 def test_projects_db_adapter_concurrent_first_readers_both_get_rows(monkeypatch, tmp_path):
@@ -381,59 +312,7 @@ def test_projects_db_adapter_concurrent_first_readers_both_get_rows(monkeypatch,
     with ThreadPoolExecutor(max_workers=2) as executor:
         rows = list(executor.map(lambda _: adapter.load_projects_from_db(profile_name="work"), range(2)))
 
-    expected = [{"project_id": "first", "name": "First", "color": "#123456", "profile": "work"}]
-    assert rows == [expected, expected]
-
-
-def test_projects_db_adapter_retries_without_immutable_when_wal_appears(monkeypatch, tmp_path):
-    import api.projects_db_adapter as adapter
-
-    fake_projects = [
-        types.SimpleNamespace(slug="db", name="DB", color=None, archived=False)
-    ]
-    _install_fake_projects_db(monkeypatch, projects=fake_projects)
-    db_file = _profile_home(tmp_path, "work") / "projects.db"
-    db_file.parent.mkdir(parents=True)
-    db_file.write_text("", encoding="utf-8")
-    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
-    real_connect = sqlite3.connect
-    seen = []
-
-    def _connect(database, *args, **kwargs):
-        seen.append(database)
-        if database.endswith("?mode=ro&immutable=1"):
-            db_file.with_name("projects.db-wal").write_text("", encoding="utf-8")
-            raise sqlite3.OperationalError("no such table: projects")
-        return real_connect(database, *args, **kwargs)
-
-    monkeypatch.setattr(adapter.sqlite3, "connect", _connect)
-
-    assert adapter.load_projects_from_db(profile_name="work")
-    assert seen[0].endswith("?mode=ro&immutable=1")
-    assert seen[1].endswith("?mode=ro")
-
-
-def test_projects_db_adapter_read_does_not_create_sqlite_sidecars(monkeypatch, tmp_path):
-    import api.projects_db_adapter as adapter
-
-    fake_projects = [
-        types.SimpleNamespace(slug="db", name="DB", color=None, archived=False)
-    ]
-    _install_fake_projects_db(monkeypatch, projects=fake_projects)
-    db_file = _profile_home(tmp_path, "work") / "projects.db"
-    db_file.parent.mkdir(parents=True)
-    setup_conn = sqlite3.connect(db_file)
-    setup_conn.execute("PRAGMA journal_mode=WAL")
-    setup_conn.close()
-    db_file.with_name("projects.db-wal").unlink(missing_ok=True)
-    db_file.with_name("projects.db-shm").unlink(missing_ok=True)
-    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: _profile_home(tmp_path, name), raising=False)
-
-    rows = adapter.load_projects_from_db(profile_name="work")
-
-    assert rows == [{"project_id": "db", "name": "DB", "color": None, "profile": "work"}]
-    assert not db_file.with_name("projects.db-wal").exists()
-    assert not db_file.with_name("projects.db-shm").exists()
+    assert [[row["project_id"] for row in result] for result in rows] == [["first"], ["first"]]
 
 
 def test_load_projects_uses_db_rows_when_projects_json_is_absent_for_read_only_callers(monkeypatch, tmp_path):
@@ -858,7 +737,7 @@ def test_routes_project_rename_and_delete_use_profile_identity(monkeypatch):
         {"project_id": "shared", "name": "Work", "profile": "work"},
     ]
 
-    monkeypatch.setattr(routes, "load_projects", lambda: list(projects))
+    monkeypatch.setattr(routes, "load_projects", lambda **_kwargs: list(projects))
     monkeypatch.setattr(routes, "save_projects", lambda rows: saved.append(list(rows)))
     monkeypatch.setattr(routes, "get_active_profile_name", lambda: "work")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
