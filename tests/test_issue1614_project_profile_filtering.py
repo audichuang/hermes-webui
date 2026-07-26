@@ -219,31 +219,45 @@ def test_load_projects_idempotent_after_first_migrate(tmp_path, monkeypatch):
 # ── _profiles_match shape used by /api/projects ───────────────────────────
 
 
-def test_profile_field_on_project_dict_default_create(monkeypatch):
-    """A new project dict shape must include `profile` after create.
+def test_project_create_uses_validated_requested_profile(monkeypatch):
+    """Create uses the requested profile, falls back to active, and rejects invalid ids."""
+    from urllib.parse import urlparse
 
-    We can't full-stack-test the HTTP path without spinning up a server, so
-    instead we pin the file-level invariant: the create handler now stamps
-    `profile` on the created dict.
-    """
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
+    import api.routes as routes
 
-    # The create handler must now include get_active_profile_name() for the new dict
-    create_idx = src.find('"/api/projects/create"')
-    assert create_idx > 0
-    next_handler_idx = src.find('"/api/projects/rename"', create_idx)
-    create_block = src[create_idx:next_handler_idx]
-    # The create handler must stamp the profile from a (validated) body value or
-    # the active profile. #3331 follow-up: the raw body value is now validated
-    # via _PROFILE_ID_RE before stamping, so the expression reads `_requested_profile`.
-    assert '"profile": _requested_profile or get_active_profile_name() or \'default\'' in create_block, (
-        "Project create must stamp the active profile or accept a validated profile from body (#1614/#3331)"
+    requests = iter([
+        {"name": "Work project", "profile": "work"},
+        {"name": "Default project"},
+        {"name": "Invalid project", "profile": "../default"},
+    ])
+    created_for = []
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "read_body", lambda _handler: next(requests))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400: {"error": message, "status": status},
     )
-    # And the validation guard must be present (reject unknown/invalid profile ids).
-    assert '_PROFILE_ID_RE.fullmatch(_requested_profile)' in create_block, (
-        "Project create must validate a client-supplied profile before stamping it (#3331)"
+    monkeypatch.setattr(
+        "api.projects_db_adapter.create_project_in_db",
+        lambda *, profile_name, name, **_kwargs: created_for.append(profile_name) or {
+            "project_id": name.lower().replace(" ", "-"),
+            "name": name,
+            "profile": profile_name,
+        },
     )
+
+    requested = routes.handle_post(object(), urlparse("/api/projects/create"))
+    fallback = routes.handle_post(object(), urlparse("/api/projects/create"))
+    invalid = routes.handle_post(object(), urlparse("/api/projects/create"))
+
+    assert requested["project"]["profile"] == "work"
+    assert fallback["project"]["profile"] == "default"
+    assert invalid == {"error": "invalid profile", "status": 400}
+    assert created_for == ["work", "default"]
 
 
 def test_project_rename_rejects_cross_profile():
