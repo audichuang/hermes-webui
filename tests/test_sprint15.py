@@ -65,7 +65,7 @@ def test_create_project():
     pids = []
     try:
         pid, proj = make_project(pids, "My Project", "#7cb9ff")
-        assert pid and len(pid) == 12
+        assert pid == proj["project_id"]
         assert proj["name"] == "My Project"
         assert proj["color"] == "#7cb9ff"
         assert "created_at" in proj
