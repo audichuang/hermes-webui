@@ -6,9 +6,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _git_check_ignore(path: str) -> subprocess.CompletedProcess[str]:
+def _git_check_ignore(
+    path: str, *, no_index: bool = False
+) -> subprocess.CompletedProcess[str]:
+    # fork delta: `git check-ignore` never reports a TRACKED path as ignored,
+    # because ignore rules do not apply to tracked files. This fork deliberately
+    # force-adds AGENTS.local.md so it survives a worktree rebuild, which flips
+    # the tracked-aware answer. `--no-index` asks the narrower question the
+    # policy actually cares about — "does .gitignore still cover this pattern?"
+    args = ["git", "check-ignore", "-q"]
+    if no_index:
+        args.append("--no-index")
+    args.append(path)
     return subprocess.run(
-        ["git", "check-ignore", "-q", path],
+        args,
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -23,7 +34,7 @@ def test_new_top_level_markdown_docs_are_trackable():
 def test_root_agents_entrypoint_is_trackable():
     """AGENTS.md is the shared repo entrypoint; local overrides stay ignored."""
     assert _git_check_ignore("AGENTS.md").returncode == 1
-    assert _git_check_ignore("AGENTS.local.md").returncode == 0
+    assert _git_check_ignore("AGENTS.local.md", no_index=True).returncode == 0
 
 
 def test_docs_scratch_files_remain_ignored():
