@@ -85,26 +85,32 @@ git push fork develop --force-with-lease
 **判讀規則:不要只看 exit code,先確認輸出有 `N passed` 那行。** 正常規模約
 13900+ passed / 約 410 秒。只有 4 行輸出 = 沒跑起來,見下。
 
-### `.venv` 不見時的陷阱
+### `.venv` 不見時的陷阱(已用 settings.json 擋掉)
 
 `.venv` 也是 gitignored(第 74 行),**worktree 重建或 `git clean -xdf` 之後會消失**。
-這時腳本會探測 `python3.13 → python3.12 → python3.11 → python3`,撞到本機缺 ensurepip 的
-`/usr/bin/python3.12` 就**直接放棄、不會 fallback 到可用的 3.11**。
+沒有防護時腳本會探測 `python3.13 → python3.12 → python3.11 → python3`,撞到本機缺
+ensurepip 的 `/usr/bin/python3.12` 就**直接放棄、不會 fallback 到可用的 3.11**。
 
 它失敗得很安靜:只印 4 行、**一個測試都沒跑**。若用 `./scripts/test.sh ... | tail` 取輸出,
 `$?` 拿到的是 `tail` 的 0,看起來完全像全綠。2026-08-01 就這樣白跑一次。
 
-**用 uv 重建即可**(uv 用自己下載的 Python,完全不碰系統 ensurepip,也不用 sudo):
+**防護已就位**:`.claude/settings.json`(同樣 force-add 進版控)把
+`HERMES_WEBUI_TEST_PYTHON` 固定指到 `~/.local/bin/python3.11` —— 那是 uv 管的 Python,
+symlink 走不帶 patch 版號的 `cpython-3.11-linux-x86_64-gnu`,升 patch 也不會斷。
+探測流程因此永遠不會選到壞掉的 3.12,`.venv` 不存在時會自己正確建起來。
+**不要刪掉那個設定。**
+
+設定若失效(例如換機器、路徑變了),手動重建:
 
 ```bash
 uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
-./scripts/test.sh -q --timeout=300     # 之後照常跑,會重用這個 .venv
 ```
 
 `--seed` 不能省:`uv venv` 預設不裝 pip,而 test.sh 的重用檢查有一項是「跑得動 pip」,
 沒 pip 它會判定要重建,又繞回壞掉的探測流程。
 
-也可以 `sudo apt install python3.12-venv` 從根本修好探測路徑,但那要 sudo;uv 這條不用。
+(`sudo apt install python3.12-venv` 也能修探測路徑,但要 sudo,而且裝完自動探測會改用
+**系統** Python 建 venv,反而繞開 uv。**不建議。**)
 
 ## 4. 既有環境失敗(可扣掉)
 

@@ -1,0 +1,5 @@
+{
+  "env": {
+    "HERMES_WEBUI_TEST_PYTHON": "/home/audichuang/.local/bin/python3.11"
+  }
+}
