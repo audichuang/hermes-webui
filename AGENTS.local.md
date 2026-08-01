@@ -25,14 +25,14 @@
 
 ## 三件最容易踩的
 
-- **測試**:`.venv` 存在時 `./scripts/test.sh` 直接重用,一切正常。**`.venv` 不見時**
-  (worktree 重建、`git clean -xdf`)腳本會探測 `python3.13 → 3.12 → 3.11`,撞到本機缺
-  ensurepip 的 `/usr/bin/python3.12` 就**直接放棄、不 fallback**,只印 4 行、**零測試**。
-  遇到就先用 uv 重建,再照常跑:
+- **測試**:直接 `./scripts/test.sh -q --timeout=300` 就好。`.claude/settings.json` 已把
+  `HERMES_WEBUI_TEST_PYTHON` 固定指到 uv 管的 `~/.local/bin/python3.11`,所以連 `.venv`
+  不存在時都會自己正確建起來 —— **不要刪掉那個設定**,它擋的是下面這個坑:
 
-  ```bash
-  uv venv --seed --python 3.11 .venv     # --seed 才有 pip,test.sh 需要
-  ```
+  > 沒有那個變數、`.venv` 又不存在時,腳本會探測 `python3.13 → 3.12 → 3.11`,撞到本機
+  > 缺 ensurepip 的 `/usr/bin/python3.12` 就**直接放棄、不 fallback**,只印 4 行、
+  > **零測試**,看起來卻很像全綠。若設定沒生效,手動用
+  > `uv venv --seed --python 3.11 .venv` 重建(`--seed` 才有 pip,test.sh 會檢查)。
 
   **判讀一律看 `N passed` 那行,不要只看 exit code**(正常約 13900+ passed / 約 410 秒)。
 - **重啟服務用 `systemctl --user restart hermes-webui-projects.service`,不要用 `ctl.sh`**
