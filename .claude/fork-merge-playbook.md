@@ -76,21 +76,35 @@ git push fork develop --force-with-lease
 ## 3. 測試
 
 ```bash
-HERMES_WEBUI_TEST_PYTHON=/home/audichuang/.local/bin/python3.11 ./scripts/test.sh -q --timeout=300
+./scripts/test.sh -q --timeout=300
 ```
 
-**一定要帶那個環境變數。** 腳本探測順序是 `python3.13 → python3.12 → python3.11 → python3`,
-這台機器的 `/usr/bin/python3.12` 缺 ensurepip(`python3.12-venv` 沒裝),建 `.venv` 失敗後
-腳本**直接放棄、不會 fallback 到可用的 3.11**。
-
-危險在於它失敗得很安靜:只印 4 行、**一個測試都沒跑**。若用 `./scripts/test.sh ... | tail`
-取輸出,`$?` 拿到的是 `tail` 的 0,看起來完全像全綠。
+`.venv` 存在且是支援版本(3.11/3.12/3.13)又有 pip 時,腳本直接重用、不碰探測流程,
+這樣跑就對了。單跑幾個測試用 `.venv/bin/python -m pytest -q <target>`。
 
 **判讀規則:不要只看 exit code,先確認輸出有 `N passed` 那行。** 正常規模約
-13900+ passed / 約 410 秒。只有 4 行輸出 = 沒跑起來。
+13900+ passed / 約 410 秒。只有 4 行輸出 = 沒跑起來,見下。
 
-`.venv` 在 repo root、已被 gitignore(第 74 行),建好可重用;單跑幾個測試用
-`.venv/bin/python -m pytest -q <target>`。
+### `.venv` 不見時的陷阱
+
+`.venv` 也是 gitignored(第 74 行),**worktree 重建或 `git clean -xdf` 之後會消失**。
+這時腳本會探測 `python3.13 → python3.12 → python3.11 → python3`,撞到本機缺 ensurepip 的
+`/usr/bin/python3.12` 就**直接放棄、不會 fallback 到可用的 3.11**。
+
+它失敗得很安靜:只印 4 行、**一個測試都沒跑**。若用 `./scripts/test.sh ... | tail` 取輸出,
+`$?` 拿到的是 `tail` 的 0,看起來完全像全綠。2026-08-01 就這樣白跑一次。
+
+**用 uv 重建即可**(uv 用自己下載的 Python,完全不碰系統 ensurepip,也不用 sudo):
+
+```bash
+uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
+./scripts/test.sh -q --timeout=300     # 之後照常跑,會重用這個 .venv
+```
+
+`--seed` 不能省:`uv venv` 預設不裝 pip,而 test.sh 的重用檢查有一項是「跑得動 pip」,
+沒 pip 它會判定要重建,又繞回壞掉的探測流程。
+
+也可以 `sudo apt install python3.12-venv` 從根本修好探測路徑,但那要 sudo;uv 這條不用。
 
 ## 4. 既有環境失敗(可扣掉)
 
