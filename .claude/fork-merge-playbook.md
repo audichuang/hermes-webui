@@ -2,22 +2,16 @@
 
 這個 fork 併上游、接收上游 PR、跑測試、上線的完整流程。
 
-> 本檔與 `AGENTS.local.md` 都被 `.gitignore` 排除(第 20、22 行),是純 local 檔,
-> **不會跟著 clone/worktree 走**。2026-08-01 查證:兩者在全機與 git 全歷史中皆不存在,
-> 這份是依當天實際跑過的流程重建的。紅線一併收在本檔,不要再散到別處。
+> 本檔、`AGENTS.local.md`、`CLAUDE.md` 都被 `.gitignore` 排除,但已 `git add -f` 納入版控
+> —— 否則 worktree 一重建就整份消失(2026-08-01 就這樣不見過一次)。
+> 本檔是「要用才讀」的那層,不會自動載入。
 
 ---
 
 ## 0. 紅線
 
-1. **commit message 絕不出現 `#<數字>`,含 body。** 會在上游 PR 底下灌 cross-reference,
-   原作者看得到。而且我們用 rebase,每次 rebase 都會再污染一次。
-2. **不加 `Co-Authored-By` 或任何 attribution 行**(`~/.claude/settings.json` 已強制)。
-3. **force push 先問。** 唯一例外:每日同步排程,且「預演乾淨」與「測試扣掉既有失敗後全綠」
-   兩關都過。人工介入修過的分支要重新問。
-4. **remote 語意是反的**:`origin` = 上游 `nesquena/hermes-webui`,`fork` = 自己的
-   `audichuang/hermes-webui`。**沒有 `upstream` 這個 remote。** 推錯地方等於把私有分支
-   推上上游。
+**正本在 `AGENTS.local.md`** —— 那份透過 `CLAUDE.md` 常駐 context,每次都會載入。
+這裡刻意不複述,免得兩處漂移。動手前確認你讀到的是那份。
 
 ## 1. 地形
 
@@ -123,15 +117,36 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 | `test_tls_aware_probe.py::test_helper_insecure_optin_is_silent` | 同上 | 同上 |
 | `test_xsession_wakeup_misroute.py::test_turn_identity_binder_restores_previous_value` | `ModuleNotFoundError: No module named 'gateway'` | hermes-agent 未安裝 |
 
-共 4 個測試 / 3 類。**清單以外的任何失敗都要當真。**
+共 4 個測試 / 3 類。
+
+### 另有 5 個 flaky(不是回歸,但也不是「可扣掉」)
+
+- `test_issue3023_safe_session_id_validators.py::test_session_delete_validator_accepts_hyphenated_ids`
+- `test_issue4662_sidebar_redaction_read_once.py::test_sessions_search_branches_redact_derived_titles`
+- `test_security_redaction.py::test_api_session_redacts_messages`
+- `test_security_redaction.py::test_api_session_export_redacts`
+- `test_static_asset_resolver.py::test_service_worker_and_favicon_follow_selected_static_root`
+
+2026-08-01 實測:**同一份程式碼**兩次跑出 9 failed vs 4 failed(總數固定 13969),
+5 個一起單獨跑 3.7 秒全過。所以是 flaky,不是回歸。**機制未查明**。
+
+**失敗只落在這 5 個之內 → 先重跑一次完整套件再判斷**,不要立刻假設是自己改壞的
+(照「清單以外都要當真」的字面走,會開始找不存在的回歸 —— 當初為此燒了三輪約 21 分鐘)。
+要證因果就跑 HEAD 對照組:`git stash push -u` → 跑 → `git stash pop --index`,
+先 `git diff --cached > patch` 備份並用 sha256 驗還原。
+
+**這 5 個以外的任何失敗仍然都要當真。**
 
 ## 5. fork delta 慣例
 
 我們改到**上游檔案**時,加一行 `# fork delta:` 或 `// fork delta:` 註解說明為什麼,
 讓下次 rebase 撞到的人知道不能直接丟掉。`grep -rn "fork delta" tests/ static/` 可列出全部。
 
-現有的 delta(2026-08-01):
+現有的 delta:
 
+- `AGENTS.md` —— 檔尾兩行,指向 `AGENTS.local.md`。**這是給讀 `AGENTS.md` 的工具用的**
+  (codex 等);Claude Code 2.1.220 實測不載入 repo 的 `AGENTS.md`,它走 `CLAUDE.md`。
+  只加在檔尾、措辭通用,rebase 撞衝突的機率低。**不要 upstream 這兩行。**
 - `tests/test_issue4856_android_scroll_regression.py` —— 測試用寫死的字元窗擷取
   `_recordNonMessageScrollIntent` 再做 substring 斷言。上游和我們各自加長這支函式後
   疊起來超出窗,窗放寬到 2000。**上游若再加長,這裡會再爆,繼續放寬即可。**
@@ -151,4 +166,27 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
   直接撿等於把漏洞一起撿進來。**撿之前先讀報告。**
 - 接進來用 `git merge --squash`,**不要 cherry-pick**(PR 分支通常混了數個 merge commit)。
 - squash 後自己寫 commit message,原 PR 的 `#編號` 要清掉(紅線 1)。可在 message 寫
-  `(upstream PR 5763)` 這種不帶 `#` 的形式 —— 現有 commit 就是這樣寫的。
+  `(upstream PR 5771)` 這種不帶 `#` 的形式。
+- **編號抄 PR 號,不要抄 issue 號。** projects db 那批既有 commit 標的 `5763` 是 issue
+  (「migrate WebUI Projects to Hermes Agent upstream projects.* JSON-RPC surface」),
+  實際 PR 是 **5771**。上游習慣把 PR 標題寫成 `fix(#<issue>): ...`,squash 時很容易把
+  issue 號當成 PR 號帶進來。已進歷史的改不動,新的別再錯。
+
+## 7. 試過但沒過的:離線緩衝位元組上限
+
+2026-08-01~02 給 `StreamChannel._offline_buffer`(`api/config.py:8628`)加位元組上限
+(upstream issue 6351)。做到 850 行,七輪 codex adversarial review 仍是 NOT SHIPPABLE,
+**已從 `develop` 抽掉**,工作留在 tag **`byte-cap-wip`**。`develop` 維持上游行為
+(只有 `_OFFLINE_BUFFER_MAXLEN` = 8192 這個**數量**上限)。
+
+**教訓不是「哪個數字算錯」,是「對這個設計的極限的刻畫本身不可靠」。** 三次把殘留寫成
+「可接受、有界」,三次被下一輪證明界限是錯的:取樣外推低報 1,114 倍;超大 frame 從
+「約 2.05x 上限」變 2.865x,外加從未量化的 6-8x enqueue 尖峰;呼叫端變更的窗口從
+「一個 frame 寬」變成活到佇列被消費、可無界成長。估算一個**會變、且由呼叫端擁有**的
+物件,本質上就是在追移動目標。
+
+**重做別再從「加上限 + 估算大小」出發。** 要嘛在 enqueue 當下產生**不可變表示**並保留
+(注意 JSON round-trip 會把 aliased value 展開,對別名密集的 payload 反而更耗記憶體),
+要嘛讓超大 frame 走明確的 journal 復原路徑。動手前先讀 `subscribe_with_snapshot()`
+(`api/config.py:8700`)那段註解 —— 重播契約寫在那裡,而且**丟掉最新的 frame 會讓分頁
+停在 heartbeat 等下去**(事件在 journal 裡,但復原程式不會去拿)。
