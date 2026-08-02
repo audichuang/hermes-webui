@@ -124,3 +124,9 @@ python3 bootstrap.py
 
 Do not include private machine instructions in this tracked file. Use a
 git-ignored local note for personal workflow details.
+
+<!-- fork delta: fork-only pointer, do not upstream. This file is not
+     auto-loaded by Claude Code 2.1.220, so the line below is the only way a
+     tool that DOES read AGENTS.md (e.g. codex) learns the fork's red lines. -->
+Fork checkouts may carry non-upstream constraints — inverted remote semantics,
+commit-message rules — in `AGENTS.local.md`. Read it before any git operation.
