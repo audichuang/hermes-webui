@@ -154,9 +154,22 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
   `_freshProgrammaticScrollActive` 要加進名單,它讀的 `PROGRAMMATIC_SCROLL_VALID_MS`
   是 module-level const、`_extract_js_function` 抽不到,直接從 `ui.js` 取實際那行注入
   (不要在測試裡複製一份數值,會漂移)。
+- `tests/test_issue6414_programmatic_scroll_user_intent.py` —— 我們自有的 node harness,
+  抽 `scrollIfPinned` 出來跑。上游把 `ui.js` 裡**所有** `_autoScrollFollow` 裸讀改成
+  `window._autoScrollFollow`,harness 原本只給裸 `const`,`window` 未定義就 ReferenceError、
+  node exit 1。已改成 `const window = {{ _autoScrollFollow: true }}` shim(在 f-string 裡,
+  所以大括號要 double)。**上游再搬動這個 flag 的歸屬,這裡要跟著改。**
+- `api/routes.py` —— `_handle_memory_read` 的 payload 尾巴多回傳 `memory_enabled` /
+  `user_profile_enabled`。上游只在伺服器端 gate、不回傳 flag,而我們的 memory 面板要靠這
+  兩個欄位隱藏停用區塊(`static/panels.js` 的 `_memorySectionEnabled`,上游沒有對應物,
+  覆蓋在 `tests/test_issue6406_memory_panel_gates.py`)。純 append 兩行,衝突面很小。
 
-教訓:**我們在 `static/ui.js` 加私有 helper 時,上游測試不可能認得它。**
+教訓一:**我們在 `static/ui.js` 加私有 helper 時,上游測試不可能認得它。**
 動 `ui.js` 的共用函式前先想一下有哪些 harness 會抽它。
+
+教訓二(上面那條的鏡像):**上游改掉共用函式的「讀取方式」,我們抽它的 harness 也會認不得。**
+裸讀變 `window.*`、變 getter、變參數注入都算,而且症狀是 node 直接 exit 1、不是斷言失敗,
+看起來像測試壞掉而不是環境不合。撞到就先看抽出來的函式碰了哪些名字,harness 有沒有餵。
 
 ## 6. 接收上游沒合併的 PR
 
