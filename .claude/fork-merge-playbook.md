@@ -119,23 +119,30 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 
 共 4 個測試 / 3 類。
 
-### 另有 5 個 flaky(不是回歸,但也不是「可扣掉」)
+### 另有 6 個 flaky(不是回歸,但也不是「可扣掉」)
 
 - `test_issue3023_safe_session_id_validators.py::test_session_delete_validator_accepts_hyphenated_ids`
 - `test_issue4662_sidebar_redaction_read_once.py::test_sessions_search_branches_redact_derived_titles`
 - `test_security_redaction.py::test_api_session_redacts_messages`
 - `test_security_redaction.py::test_api_session_export_redacts`
 - `test_static_asset_resolver.py::test_service_worker_and_favicon_follow_selected_static_root`
+- `test_issue5210_http_worker_bound.py::test_worker_slot_releases_after_request_finishes`
+  —— 2026-08-08 加入。同一份**產品**程式碼連跑兩輪:第一輪 failed、第二輪沒出現,
+  單跑該檔 7 passed。名字就是 timing 敏感型(worker slot 釋放),整套跑時搶資源。
 
 2026-08-01 實測:**同一份程式碼**兩次跑出 9 failed vs 4 failed(總數固定 13969),
 5 個一起單獨跑 3.7 秒全過。所以是 flaky,不是回歸。**機制未查明**。
 
-**失敗只落在這 5 個之內 → 先重跑一次完整套件再判斷**,不要立刻假設是自己改壞的
+**失敗只落在這 6 個之內 → 先重跑一次完整套件再判斷**,不要立刻假設是自己改壞的
 (照「清單以外都要當真」的字面走,會開始找不存在的回歸 —— 當初為此燒了三輪約 21 分鐘)。
 要證因果就跑 HEAD 對照組:`git stash push -u` → 跑 → `git stash pop --index`,
 先 `git diff --cached > patch` 備份並用 sha256 驗還原。
 
-**這 5 個以外的任何失敗仍然都要當真。**
+判斷 flaky 有個比對照組更快的路子:**如果這輪與上輪的產品程式碼差異為零**
+(只動了測試 harness 或 .md),而某個測試只在其中一輪失敗,那它就是 flaky ——
+不必再跑 stash 對照組。2026-08-08 就是這樣認出 `test_issue5210` 的。
+
+**這 6 個以外的任何失敗仍然都要當真。**
 
 ## 5. fork delta 慣例
 
