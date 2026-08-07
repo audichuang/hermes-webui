@@ -22404,6 +22404,10 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(cfg),
+            # fork delta: the panel hides disabled sections client-side, which needs
+            # these flags in the payload. Upstream gates server-side only.
+            "memory_enabled": memory_enabled,
+            "user_profile_enabled": user_profile_enabled,
         },
     )
 
