@@ -79,6 +79,17 @@ git push fork develop --force-with-lease
 **判讀規則:不要只看 exit code,先確認輸出有 `N passed` 那行。** 正常規模約
 13900+ passed / 約 410 秒。只有 4 行輸出 = 沒跑起來,見下。
 
+假綠有第二種形態:**collection error**。任何測試檔在 module 層 import 缺席的套件,
+pytest 會 `Interrupted: 1 error during collection` 中止**整套**,結尾長這樣:
+
+```
+1 skipped, 9 warnings, 1 error in 21.53s     # 沒有 "N passed",21 秒不是 410 秒
+```
+
+2026-08-09 撞到:上游新增的 `test_compression_phantom_barrier.py` module 層裸
+`from playwright.sync_api import ...`,本機沒裝 playwright,14330 個測試一個都沒跑。
+**辨識法一樣是找 `N passed`;沒有那行就當作沒跑。** 修法見第 5 節同名 delta。
+
 ### `.venv` 不見時的陷阱(已用 settings.json 擋掉)
 
 `.venv` 也是 gitignored(第 74 行),**worktree 重建或 `git clean -xdf` 之後會消失**。
@@ -154,18 +165,10 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 - `AGENTS.md` —— 檔尾兩行,指向 `AGENTS.local.md`。**這是給讀 `AGENTS.md` 的工具用的**
   (codex 等);Claude Code 2.1.220 實測不載入 repo 的 `AGENTS.md`,它走 `CLAUDE.md`。
   只加在檔尾、措辭通用,rebase 撞衝突的機率低。**不要 upstream 這兩行。**
-- `tests/test_issue4856_android_scroll_regression.py` —— 測試用寫死的字元窗擷取
-  `_recordNonMessageScrollIntent` 再做 substring 斷言。上游和我們各自加長這支函式後
-  疊起來超出窗,窗放寬到 2000。**上游若再加長,這裡會再爆,繼續放寬即可。**
-- `tests/test_issue5637_stale_anchor_guard.py` —— node harness 按名單抽函式。我們的
-  `_freshProgrammaticScrollActive` 要加進名單,它讀的 `PROGRAMMATIC_SCROLL_VALID_MS`
-  是 module-level const、`_extract_js_function` 抽不到,直接從 `ui.js` 取實際那行注入
-  (不要在測試裡複製一份數值,會漂移)。
-- `tests/test_issue6414_programmatic_scroll_user_intent.py` —— 我們自有的 node harness,
-  抽 `scrollIfPinned` 出來跑。上游把 `ui.js` 裡**所有** `_autoScrollFollow` 裸讀改成
-  `window._autoScrollFollow`,harness 原本只給裸 `const`,`window` 未定義就 ReferenceError、
-  node exit 1。已改成 `const window = {{ _autoScrollFollow: true }}` shim(在 f-string 裡,
-  所以大括號要 double)。**上游再搬動這個 flag 的歸屬,這裡要跟著改。**
+- `tests/test_compression_phantom_barrier.py` —— 上游在 module 層裸 import playwright,
+  本機沒裝就 abort 掉**整個** collection(第 3 節那個 21 秒假綠)。補
+  `pytest.importorskip("playwright")`,跟 repo 裡另外 11 個瀏覽器測試檔同慣例。
+  **上游之後再加 playwright 測試檔,大概要再補一次。**
 - `api/routes.py` —— `_handle_memory_read` 的 payload 尾巴多回傳 `memory_enabled` /
   `user_profile_enabled`。上游只在伺服器端 gate、不回傳 flag,而我們的 memory 面板要靠這
   兩個欄位隱藏停用區塊(`static/panels.js` 的 `_memorySectionEnabled`,上游沒有對應物,
@@ -177,6 +180,17 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 教訓二(上面那條的鏡像):**上游改掉共用函式的「讀取方式」,我們抽它的 harness 也會認不得。**
 裸讀變 `window.*`、變 getter、變參數注入都算,而且症狀是 node 直接 exit 1、不是斷言失敗,
 看起來像測試壞掉而不是環境不合。撞到就先看抽出來的函式碰了哪些名字,harness 有沒有餵。
+
+教訓三:**上游正式合併我們撿過的 PR 時,圍繞它長出來的 fork delta 會整批一起死,
+而且死法是「重複」不是「缺少」。** 2026-08-09 上游合了 upstream PR 6453,一次帶走三條:
+`test_issue6414` 的 window shim(上游自己加了)、`test_issue5637` 的 const 注入(上游
+自己寫死了,我方那行變成重複 `const` → node SyntaxError)、`test_issue4856` 的字元窗
+放寬(ui.js 回到上游版就不需要了)。
+
+實務上的意思:**撿過的 PR 一旦在上游 log 裡出現同名 commit,先去 grep 那批 fork delta,
+別等測試紅了才回頭找。** 上游那個 commit 的標題通常跟我們當初的 commit 標題幾乎一樣
+—— 那就是信號。另外注意這種 delta 在 `merge-tree` 預演裡**看不出來**:文字位置不同,
+自動合併會成功,壞掉的是語意(重複宣告)。又一個「預演乾淨 ≠ 安全」的實例。
 
 ## 6. 接收上游沒合併的 PR
 
