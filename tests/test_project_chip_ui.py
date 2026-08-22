@@ -265,7 +265,11 @@ class TestQuickCreateMobileDrawer:
         block = self._quick_create_block()
         render_idx = block.find("renderSessionList({deferWhileInteracting:false})")
         close_idx = block.find("closeMobileSidebar")
-        catch_idx = block.find("catch(err)")
+        # fork delta: our profile-switch guard adds an earlier `catch(err)` ahead of
+        # the success-path try, so an unanchored find() locks onto the wrong one.
+        # Anchor at the repaint — the catch that closes the success path is always
+        # after it, which is exactly what this test means by "the try block".
+        catch_idx = block.find("catch(err)", render_idx)
         assert render_idx != -1, "sidebar repaint call not found in quick-create handler"
         assert close_idx != -1, "closeMobileSidebar not found in quick-create handler"
         assert catch_idx != -1, "success-path try/catch not found in quick-create handler"
