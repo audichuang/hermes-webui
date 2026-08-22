@@ -127,8 +127,43 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 | `test_tls_aware_probe.py::test_helper_self_signed_warns_and_succeeds` | `health_probe.sh` returncode 1 | 本機 TLS 探測環境 |
 | `test_tls_aware_probe.py::test_helper_insecure_optin_is_silent` | 同上 | 同上 |
 | `test_xsession_wakeup_misroute.py::test_turn_identity_binder_restores_previous_value` | `ModuleNotFoundError: No module named 'gateway'` | hermes-agent 未安裝 |
+| `test_goal_command_webui.py::test_profile_goal_evaluation_preserves_native_wait_semantics` | `verdict` 得到 `continue` 而非 `wait` | 同下:`~/research/hermes-agent` 太舊 |
+| `test_issue6892_sync_title_coverage.py::test_sync_session_title_persists_generated_title` | 標題沒寫進 state.db | 同上 |
+| `test_issue6892_sync_title_coverage.py::test_sync_session_title_does_not_overwrite_manual_rename` | 同上 | 同上 |
 
-共 4 個測試 / 3 類。
+共 7 個測試 / 4 類。
+
+### 最後三個的成因:`conftest` 選到舊的 hermes-agent
+
+`tests/conftest.py::_discover_agent_dir()`(約 336 行)的候選順序是
+
+1. `HERMES_WEBUI_AGENT_DIR`
+2. `HERMES_HOME/hermes-agent`
+3. **`REPO_ROOT.parent/hermes-agent`** ← 我們這顆 worktree 命中這條
+4. `HOME/.hermes/hermes-agent`
+5. `HOME/hermes-agent`
+
+`~/research/hermes-agent` 與 `~/.hermes/hermes-agent` **兩份都存在,而前者比較舊**。
+因為 repo 在 `~/research/` 底下,第 3 條先命中,測試永遠拿到舊的那份。
+
+2026-08-22 雙向證明過:
+
+```bash
+# 純上游程式碼 + 舊 agent → 一樣失敗(所以不是我方回歸)
+HERMES_WEBUI_AGENT_DIR=~/research/hermes-agent  <在 origin/master 的 worktree 跑>
+# 我方程式碼 + 新 agent → 30 passed
+HERMES_WEBUI_AGENT_DIR=~/.hermes/hermes-agent .venv/bin/python -m pytest -q \
+  tests/test_goal_command_webui.py tests/test_issue6892_sync_title_coverage.py
+```
+
+**要根治就更新 `~/research/hermes-agent`**(或設 `HERMES_WEBUI_AGENT_DIR` 指到
+`~/.hermes/hermes-agent`)。沒根治前這三個就是可扣掉的環境失敗。
+
+> **對照組陷阱**:對照用的 worktree **必須開在 `~/research/` 底下**,不然
+> `REPO_ROOT.parent/hermes-agent` 會落空、改用 `~/.hermes/hermes-agent`,
+> 兩邊 agent 版本不同,對照組就白做了(2026-08-22 先踩過一次:對照組開在
+> `/tmp` 下面,27 passed 看起來像「我方回歸」,其實只是 agent 比較新)。
+> 想跑在別處就用 `HERMES_WEBUI_AGENT_DIR` 把 agent 釘住。
 
 ### 另有 6 個 flaky(不是回歸,但也不是「可扣掉」)
 
@@ -165,10 +200,20 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 - `AGENTS.md` —— 檔尾兩行,指向 `AGENTS.local.md`。**這是給讀 `AGENTS.md` 的工具用的**
   (codex 等);Claude Code 2.1.220 實測不載入 repo 的 `AGENTS.md`,它走 `CLAUDE.md`。
   只加在檔尾、措辭通用,rebase 撞衝突的機率低。**不要 upstream 這兩行。**
-- `tests/test_compression_phantom_barrier.py` —— 上游在 module 層裸 import playwright,
-  本機沒裝就 abort 掉**整個** collection(第 3 節那個 21 秒假綠)。補
-  `pytest.importorskip("playwright")`,跟 repo 裡另外 11 個瀏覽器測試檔同慣例。
-  **上游之後再加 playwright 測試檔,大概要再補一次。**
+- `api/routes.py`(`/api/session/new`)—— hermes 擁有的 project 路徑覆寫請求帶來的
+  workspace 之後,**不能**再走上游的 `_resolve_new_session_workspace()`。那支 helper 只在
+  「client 宣告是從 prev_session 繼承、且驗證過真的相同」時才放寬 trust 檢查;被我方覆寫過
+  的路徑從來不是繼承來的,必須走嚴格的 `resolve_trusted_workspace()`。2026-08-22 併
+  upstream PR 7180 時解出來的。
+- `static/sessions.js`(`newSession()`)—— workspace 優先序是
+  `switchWs > projectWs > sessionWs > profileDefault`。上游 PR 7180 的順序是
+  `switch > session > profileDefault`(它的 `tests/test_issue4755_...` 有 MAINTAINER NOTE
+  刻意寫死這個順序,**別動它的相對關係**),我方只把選定 project 的路徑插在 sessionWs 之前。
+  連帶:`sessionWs` 的定義要排除 `projectWs`,否則
+  `workspace_inherited_from_prev_session` 會謊報來源,讓伺服器對一個並非繼承來的路徑放寬 trust。
+- `tests/test_project_chip_ui.py` —— 上游用 `block.find("catch(err)")` 定位 quick-create
+  成功路徑的 catch,我方在 handler 前面多了一個 profile switch 的 `catch(err)`,未錨定的
+  `find()` 會鎖到錯的那個。改成 `block.find("catch(err)", render_idx)` 錨在重繪之後。
 - `api/routes.py` —— `_handle_memory_read` 的 payload 尾巴多回傳 `memory_enabled` /
   `user_profile_enabled`。上游只在伺服器端 gate、不回傳 flag,而我們的 memory 面板要靠這
   兩個欄位隱藏停用區塊(`static/panels.js` 的 `_memorySectionEnabled`,上游沒有對應物,
@@ -186,6 +231,18 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 `test_issue6414` 的 window shim(上游自己加了)、`test_issue5637` 的 const 注入(上游
 自己寫死了,我方那行變成重複 `const` → node SyntaxError)、`test_issue4856` 的字元窗
 放寬(ui.js 回到上游版就不需要了)。
+
+2026-08-22 又來一次,而且規模更大:落後 123 個 commit 才同步,rebase 一口氣**自動丟掉
+4 個 commit**——
+
+| 被丟的 | 上游把它做掉的地方 |
+|---|---|
+| `fix(streaming)` active session 守衛 | 上游 PR 6502,同檔同 12 行,git 自己認出來直接 skip |
+| `test(scroll)` 兩條 harness delta(加的那個 + 拿掉的那個) | 上游自己把 `_freshProgrammaticScrollActive` 寫進 ui.js 與抽取名單,字元窗也自己放寬到 2000 |
+| `test(compression)` playwright importorskip | 上游改成在函式內 `pytest.importorskip("playwright.sync_api")`,module 層不再 import |
+
+外加 `fix(models)` 那個的**產品程式碼**(`api/config.py` 25 行)被上游 PR 6338 吸收,
+commit 只剩測試檔。這就是 rebase 相對 merge 的好處在實際運作。
 
 實務上的意思:**撿過的 PR 一旦在上游 log 裡出現同名 commit,先去 grep 那批 fork delta,
 別等測試紅了才回頭找。** 上游那個 commit 的標題通常跟我們當初的 commit 標題幾乎一樣
