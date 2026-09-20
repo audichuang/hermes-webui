@@ -51,7 +51,7 @@ git merge-tree --write-tree --name-only HEAD origin/master   # 預演
 
 git rebase origin/master
 HERMES_WEBUI_TEST_PYTHON=/home/audichuang/.local/bin/python3.11 ./scripts/test.sh -q --timeout=300
-# 扣掉第 4 節的既有失敗後全綠,才:
+# 扣掉第 4 節「現在有效」那區列的既有失敗後全綠,才:(那區以外的失敗一律當真)
 git push fork develop --force-with-lease
 ```
 
@@ -117,23 +117,60 @@ uv venv --seed --python 3.11 .venv     # --seed 才會裝 pip,test.sh 會檢查
 (`sudo apt install python3.12-venv` 也能修探測路徑,但要 sudo,而且裝完自動探測會改用
 **系統** Python 建 venv,反而繞開 uv。**不建議。**)
 
-## 4. 既有環境失敗(可扣掉)
+## 4. 既有失敗(可扣掉)
 
-這些是本機環境缺件,不是回歸。**只有扣掉這些之後全綠才可以推。**
+不是回歸。**只有扣掉這些之後全綠才可以推。**
+
+> **這份清單會過期,扣之前先確認它還活著。** 下面「已不再重現」那區是前車之鑑:
+> 曾有 5 個掛在可扣清單上,自 2026-08-25 起早就不再失敗,照舊清單扣等於把真回歸一起扣掉。
+
+### 現在有效(2026-09-20 實測)
 
 | 測試 | 症狀 | 成因 |
 |---|---|---|
-| `test_issue4685_post_compression_context_metering.py::test_post_compression_estimate_uses_compressor_budget_counter_without_metadata_estimators` | `ImportError: cannot import name 'call_llm' from 'agent.auxiliary_client'`(`../hermes-agent/agent/context_compressor.py:28`) | hermes-agent 版本不合 |
 | `test_tls_aware_probe.py::test_helper_self_signed_warns_and_succeeds` | `health_probe.sh` returncode 1 | 本機 TLS 探測環境 |
 | `test_tls_aware_probe.py::test_helper_insecure_optin_is_silent` | 同上 | 同上 |
+| `test_model_resolver.py::test_default_model_lands_under_active_provider_group` | `gpt-5.4 not in OpenAI Codex group; contents: [...]`,contents 是 `_PROVIDER_MODELS` 硬編清單 | **上游自帶**,見下 |
+
+共 3 個。連續多輪同步都是這 3 個,`N failed` 不等於 3 就要看。
+
+#### `test_model_resolver` 那個不是環境缺件
+
+自 **2026-09-09** 起**整套跑必失敗、單跑必過**,成因是上游測試順序相依地互相污染
+(上游動了 `api/config.py` 的 provider hint / model picker 卻沒同步更新這個測試檔)。
+2026-09-09 已用**零我方程式碼**的 detached worktree 對照組硬證過,失敗集合與我方逐項相同。
+**不要再重跑對照組**(一次燒約 25 分鐘)。再看到它做三項低成本再驗(約 15 秒)就夠:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_model_resolver.py          # 應 83 passed
+git diff origin/master HEAD -- api/config.py tests/test_model_resolver.py   # 應為空
+# 失敗訊息形態應仍是 gpt-5.4 not in OpenAI Codex group,contents 為硬編清單
+```
+
+三者其一變了(單跑也失敗、我方開始有 delta、訊息形態變了)才要重新查。
+**判準是「我方對相關檔案零 delta」,不是「這棵樹沒被人工碰過」** —— 2026-09-20
+那次人工解過 rebase 衝突,但解的是 `api/routes.py` / `static/sessions.js`,與本題無關,
+推論照樣成立。
+
+### 已不再重現(2026-08-25 起),保留備查
+
+| 測試 | 症狀 | 當初的成因 |
+|---|---|---|
+| `test_issue4685_post_compression_context_metering.py::test_post_compression_estimate_uses_compressor_budget_counter_without_metadata_estimators` | `ImportError: cannot import name 'call_llm' from 'agent.auxiliary_client'` | hermes-agent 版本不合 |
 | `test_xsession_wakeup_misroute.py::test_turn_identity_binder_restores_previous_value` | `ModuleNotFoundError: No module named 'gateway'` | hermes-agent 未安裝 |
-| `test_goal_command_webui.py::test_profile_goal_evaluation_preserves_native_wait_semantics` | `verdict` 得到 `continue` 而非 `wait` | 同下:`~/research/hermes-agent` 太舊 |
+| `test_goal_command_webui.py::test_profile_goal_evaluation_preserves_native_wait_semantics` | `verdict` 得到 `continue` 而非 `wait` | 下一節:`~/research/hermes-agent` 太舊 |
 | `test_issue6892_sync_title_coverage.py::test_sync_session_title_persists_generated_title` | 標題沒寫進 state.db | 同上 |
 | `test_issue6892_sync_title_coverage.py::test_sync_session_title_does_not_overwrite_manual_rename` | 同上 | 同上 |
 
-共 7 個測試 / 4 類。
+2026-08-25 起整套跑只剩 TLS 那 2 個,單跑這四個檔案 49 passed;2026-09-09 再驗仍成立。
+`~/research/hermes-agent` 的 HEAD 當時並沒有更新,所以是上游程式碼或 conftest 選路變了,
+**成因未查明**。整套跑的 `hermes-agent not found; 30 agent-dependent tests will be skipped`
+橫幅**不包含這四個**(那 30 個是 cron 等別的測試),別把兩件事混為一談。
 
-### 最後三個的成因:`conftest` 選到舊的 hermes-agent
+**這 5 個再度失敗要當真**,不要照舊清單扣掉。下一節的成因分析仍然有效,留著是因為
+一旦 conftest 的選路邏輯再變,它會原樣回來。
+
+### 那 3 個 agent 相關失敗的成因:`conftest` 選到舊的 hermes-agent
 
 `tests/conftest.py::_discover_agent_dir()`(約 336 行)的候選順序是
 
@@ -201,10 +238,26 @@ HERMES_WEBUI_AGENT_DIR=~/.hermes/hermes-agent .venv/bin/python -m pytest -q \
   (codex 等);Claude Code 2.1.220 實測不載入 repo 的 `AGENTS.md`,它走 `CLAUDE.md`。
   只加在檔尾、措辭通用,rebase 撞衝突的機率低。**不要 upstream 這兩行。**
 - `api/routes.py`(`/api/session/new`)—— hermes 擁有的 project 路徑覆寫請求帶來的
-  workspace 之後,**不能**再走上游的 `_resolve_new_session_workspace()`。那支 helper 只在
-  「client 宣告是從 prev_session 繼承、且驗證過真的相同」時才放寬 trust 檢查;被我方覆寫過
-  的路徑從來不是繼承來的,必須走嚴格的 `resolve_trusted_workspace()`。2026-08-22 併
-  upstream PR 7180 時解出來的。
+  workspace 之後,**不能**走上游 `_resolve_new_session_workspace()` 的**寬鬆分支**。那支
+  helper 只在「client 宣告是從 prev_session 繼承、且驗證過真的相同」時才放寬 trust 檢查;
+  被我方覆寫過的路徑從來不是繼承來的,必須嚴格解析。2026-08-22 併 upstream PR 7180 時解出來的。
+
+  **2026-09-20 改了實作方式(注意,別照舊描述找程式碼)。** 原本是直接呼叫
+  `resolve_trusted_workspace(requested_workspace)` 繞開 helper;上游 `cbb4ba3f`
+  (profile isolation:new_session 改用 per-request profile、不吃 process global)給 helper
+  和 `resolve_trusted_workspace()` 都加了 `profile=`,那個直呼就變成**在我方這條路徑上把
+  上游剛修掉的 profile 洩漏重新引入**。現在改成餵一個 `prev_session_id=None` 給 helper:
+
+  ```python
+  workspace = _resolve_new_session_workspace(
+      {**body, "workspace": requested_workspace}, None, profile=request_profile
+  )
+  ```
+
+  `None` 讓 helper 必走它自己的嚴格分支(`str(_rtw(candidate))`),於是 profile 傳遞、
+  legacy-test-double 的 `except TypeError` 容錯、`if not candidate: return None` 全部自動繼承。
+  **通則:上游 helper 長出新參數時,與其複製它的呼叫,不如找一組讓它走我方要的分支的輸入**
+  —— 複製出來的那份不會跟著上游演進,這次就是它差點漏掉 profile。
 - `static/sessions.js`(`newSession()`)—— workspace 優先序是
   `switchWs > projectWs > sessionWs > profileDefault`。上游 PR 7180 的順序是
   `switch > session > profileDefault`(它的 `tests/test_issue4755_...` 有 MAINTAINER NOTE
