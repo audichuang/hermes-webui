@@ -77,13 +77,13 @@ git push fork develop --force-with-lease
 這樣跑就對了。單跑幾個測試用 `.venv/bin/python -m pytest -q <target>`。
 
 **判讀規則:不要只看 exit code,先確認輸出有 `N passed` 那行。** 正常規模約
-13900+ passed / 約 410 秒。只有 4 行輸出 = 沒跑起來,見下。
+15900+ passed / 約 590 秒(規模會隨上游長,2026-09-22 是 15935)。只有 4 行輸出 = 沒跑起來,見下。
 
 假綠有第二種形態:**collection error**。任何測試檔在 module 層 import 缺席的套件,
 pytest 會 `Interrupted: 1 error during collection` 中止**整套**,結尾長這樣:
 
 ```
-1 skipped, 9 warnings, 1 error in 21.53s     # 沒有 "N passed",21 秒不是 410 秒
+1 skipped, 9 warnings, 1 error in 21.53s     # 沒有 "N passed",21 秒不是 590 秒
 ```
 
 2026-08-09 撞到:上游新增的 `test_compression_phantom_barrier.py` module 層裸
@@ -226,6 +226,32 @@ HERMES_WEBUI_AGENT_DIR=~/.hermes/hermes-agent .venv/bin/python -m pytest -q \
 不必再跑 stash 對照組。2026-08-08 就是這樣認出 `test_issue5210` 的。
 
 **這 6 個以外的任何失敗仍然都要當真。**
+
+### 整批 `409 agent_runtime_stale` = agent 在測試中途自我更新
+
+不是回歸,也不是 flaky,是環境事件。症狀:一批打 `/api/chat/start` 的 live-server 測試
+(`test_sprint1` / `test_sprint3` / `test_sprint15` / `test_regressions`)同時失敗,錯誤 body 是
+
+```
+409 {'type': 'agent_runtime_stale', 'agent_update_state': 'unverified',
+     'error': 'Hermes Agent was updated while Hermes WebUI was running. ...'}
+```
+
+`api/agent_runtime.py` 的守衛偵測到「載入 `run_agent` 之後 agent checkout 的 HEAD 變了」就
+fail closed。測試 server 是長壽進程,整套跑約 10 分鐘,agent 的自動更新排程落在這個窗裡就會中招,
+而且是**從更新那一刻起後面全中**,所以看起來像一整批回歸。
+
+**辨識只要一行**(窗內有更新 = 找到成因):
+
+```bash
+git -C ~/.hermes/hermes-agent reflog -1 --date=iso   # 時間落在這輪測試的起訖之間?
+```
+
+**處置:重跑一次整套即可**(新 server 會載入更新後的 agent)。不要把這些名字加進扣除清單 ——
+成因是一次性事件,下一輪不會重現。2026-09-22 實測:run1 11 failed(agent 於 05:35:09
+`merge origin/main`,正好在 05:32~05:42 的測試窗內),run2 同一份程式碼只剩既有的 3 個。
+旁證:那批測試單跑 4.9 秒全過,且我方對 `api/agent_runtime.py`、`tests/conftest.py`、
+`tests/test_sprint1.py`、`tests/test_sprint3.py` 都是零 delta。
 
 ## 5. fork delta 慣例
 
